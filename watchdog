@@ -1,0 +1,189 @@
+#!/bin/bash
+
+#===================================================================
+# this code is inspired by https://github.com/kwhitefoot/watchdog
+
+# Purpose:
+
+# watch a web service via the dedicated RESTful api, 
+# if the api died, launch the cmdShutdown to clean the process and relaunch cmdStartup
+
+#--------------------------------------------
+
+# Method:
+# start the process
+# touch the activity file
+# Forever:
+#   find activity file that has not changed 
+#   If found:
+#      kill all child processes (this means that we do not need to
+#                                record the pid of the child and risk
+#                                pid recycling)
+#      sleep 1
+#      start the process
+#      sleep interval
+#   endif
+# loop
+
+# The file used to detect activity can be a file that the process
+# touches as part of its normal operations or the process can be
+# written deliberately to touch a file at intervals for just this
+# purpose.
+
+# The watchdog takes arguments specifying:
+# - the path to the process to be started, 
+# - the path to the process to be shutdown, 
+# - path to the activity file,
+# - the sleep time in whole seconds
+
+# where the command line can be almost anything but remember that ~
+# will not be expanded if you quote it and that you will probably need
+# to quote it unless it is a bare command with no arguments; use
+# ${HOME} instead.  The same applies to the path to the activity file.
+
+#---------------------------------------------------------------------
+# Prerequisites:
+
+# bash: Needs the wait builtin.
+
+# date: only used for timestamping
+
+# find, grep: These are the tools that do the real work.
+
+#===================================================================
+
+#set -x
+#set -e
+
+# exit codes
+EXIT_ARG_COUNT=1
+EXIT_SLEEP_TIME=2
+EXIT_START_FAILED=3
+EXIT_UNKNOWN=4
+exit_status=$EXIT_UNKNOWN
+
+print ()
+{
+    echo "watchdog: $(date +'%F %T')"
+    echo "watchdog: $1"
+}
+
+# Kill subprocess on exit.
+# Perhaps we should use kill -- -$BASHPID
+trap_exit () 
+{
+    echo ""
+    print "Terminating process with exit status $exit_status"
+    pkill -P $$
+    exit $exit_status
+}
+
+trap trap_exit EXIT
+
+show_usage_and_exit ()
+{
+    exit_status=$1
+    cat <<EOF
+watchdog, version 1.0
+Usage: watchdog commandStartup commamdShutdown activity interval
+Where:
+  commandStartup is a command line to be executed.  Use quotes if it includes spaces
+  commamdShutdown is a command line to shutdown the process gracefully and maybe clean temp files
+  activity is a rest api to be monitored
+  interval is the number of seconds between checks.
+
+This command executes the specified command and then loops checking to
+see if the rest api is alive.  If the api failed within the
+specified interval we kill the process and restart it and continue
+checking.
+
+Note that the command will still be restarted even if exits normally
+as long as the activity rest api is died within the interval.
+
+EOF
+    echo "Exiting with status: $exit_status"
+    exit $exit_status
+}
+
+
+# Check args
+if (( $# != 4 )); then
+    print "Expected 4 arguments."
+    print "Arg count: $#"
+    show_usage_and_exit $EXIT_ARG_COUNT
+fi
+
+# Name the arguments
+cmdStartup=$1
+cmdShutdown=$2
+activity=$3
+sleep_time=$4
+
+
+if [ "$sleep_time" -eq "$sleep_time" ] 2>/dev/null; then
+    print "Sleep time $sleep_time seconds"
+else
+    print "Sleep time must be an integer number of seconds"
+    show_usage_and_exit $EXIT_SLEEP_TIME
+fi
+
+# Start the process and check that it is running.  Abort if we cannot start.
+start_process ()
+{
+    print "starting the process"
+    print "try to exec the command: ${cmdStartup}"
+    ${cmdStartup} &
+    if ! pgrep -P $$
+    then
+        print "failed to start process"
+        show_usage_and_exit $EXIT_START_FAILED
+    fi
+}
+
+# Save our PID so that the child process can use it
+parent_pid=$$
+while true
+do
+    start_process
+    (
+        # Start sub process
+        echo "Starting subprocess to watch for hung process."
+        while true
+        do
+            print "sleeping ...${sleep_time} seconds"
+            sleep "${sleep_time}s"
+            print "Looking for if activity is alive."
+            if [ $(curl -v --silent $activity 2>&1 | grep "Failed" | wc -l) -ge 1 ]
+            then
+                # Activity file has not changed in the given interval.
+                # This means that either the program is hanging or
+                # that it has exited.  Of course the exit could be a
+                # crash or a normal exit; the wait handles this.
+
+                # Now kill all processes of which our parent is the
+                # parent which avoids needing to know the child pid
+                # and avoids the risk of pid recycling.  Note that it
+                # also kills this subshell.
+                print "The process is not active. --------"
+                print "try to kill hung process use user provided shutdown cmd: $cmdShutdown "
+                ${cmdShutdown} &
+                pkill -P $parent_pid
+            else 
+                print "The process is yet active. ++++++++"
+            fi
+        done            
+    )
+    # Now wait for the first process to exit, the real one.  It will
+    # exit for one of three reasons: crash, hang, normal.
+    wait %1
+    exit_status=$?
+    # Make sure the subprocess is dead, no zombies. 
+    pkill -P $parent_pid
+    if [ "$status" == "0" ]
+    then
+        # normal exit
+        print "Normal exit"
+    else
+        print "Abnormal exit"
+    fi
+done
