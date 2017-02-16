@@ -13,3 +13,12 @@ watchdog "command line to execute" "command line to shutdown the process" "a res
 where the command line can be anything but remember that ~ will not be expanded if you quote it and that you will probably need to quote it unless it is a bare command with no arguments. The same applies to the path to the activity file. The interval is in whole minutes.
 
 For details please see the source.
+
+# Simple usage
+```shell
+nohup ./watchdog "docker run -d --name app-alpine -p 80:80 d77dacb81895" "docker rm -f app-alpine" "http://localhost/" 30 > watchdog-app.log 2>&1 &
+```
+# Kill the watchdog
+`pkill "app-alpine" ` or `kill -9 $(ps -ef | grep "nginx-alpine" | grep -v "grep" | awk '{print $2}') `
+
+ 
